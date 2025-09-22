@@ -1,0 +1,327 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <cstring>
+#include <bits/stdc++.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <atomic>
+
+using namespace std;
+
+
+int server_socket;  // Declare the server_socket at a global scope
+
+// Signal handler to close the server socket on SIGINT
+
+
+string get_substring(string &s,int i,int j){
+    string ans="";
+    for(int l=i;l<=j;l++){
+        ans+=s[l];
+    }
+    return ans;
+}
+struct server_data {
+    atomic<bool> busy{false};
+    atomic<int> socket_id{-1};  // Socket ID now atomic
+    atomic<chrono::time_point<chrono::system_clock>*> start_time;
+    atomic<chrono::time_point<chrono::system_clock>*> last_concurrent_time;
+    atomic<bool> collide{false};  // Now an atomic flag
+    atomic<int> active_clients{0};  // Atomic counter for active clients
+
+    server_data() {
+        // Initialize the time points with atomic pointers
+        auto now = new chrono::time_point<chrono::system_clock>(chrono::system_clock::now());
+        start_time.store(now);
+        last_concurrent_time.store(now);
+    }
+
+    ~server_data() {
+        // Clean up atomic pointer memory
+        delete start_time.load();
+        delete last_concurrent_time.load();
+    }
+      // Counter for clients inside the loop
+};
+
+// Function to read words from file
+vector<string> read_from_txt_file(string filename){
+
+    vector<string>ans;
+    ifstream din;
+    din.open(filename);
+    string line;
+    // Read the single line from the file
+    if (getline(din, line)) {
+        stringstream ss(line);
+        string word;
+
+        // Split the line by commas and store each word in the vector
+        while (getline(ss, word, ',')) {
+            ans.push_back(word+",");
+        }
+    }
+
+    
+    return ans;
+}
+// Helper function to combine vector of strings into one string
+string helper(vector<string>& v) {
+    string ans = "";
+    for (auto i : v) {
+        ans += i;
+    }
+    return ans;
+}
+
+// Struct to hold client data
+struct client_data {
+    int client_sock;
+    vector<string> all_words;
+    int k;
+    int p;
+    server_data* server_state;  // Pointer to the server state
+};
+
+// Client handling function for each thread
+void* handle_client(void* arg) {
+    client_data* data = (client_data*)arg;
+    int client_sock = data->client_sock;
+    vector<string> all_words = data->all_words;
+    int k = data->k;
+    int p = data->p;
+    int m = all_words.size();
+    server_data* server_state = data->server_state;
+ //   cout<<client_sock<<endl;
+    while (true) {
+        // Synchronize access to shared state
+        bool is_end_of_communication =false;
+        while (true){
+            bool ready_to_serve=false; 
+            char message[1024] = {0};
+            int bytes_received = recv(client_sock, message, sizeof(message) - 1, 0);
+            cout<<client_sock<<" "<<message<<endl;
+            if (bytes_received < 0) {
+                perror("Error receiving message");
+                close(client_sock);
+                break; // Exit the loop
+            } else if (bytes_received == 0) {
+                cout << "Client disconnected." << endl;
+                close(client_sock);
+                break; // Exit the loop
+            }
+            cout<<"sewcre"<<endl;
+            string for_check (message);
+            
+            
+            if(for_check == "BUSY?\n") {
+            //    cout<<"busy found"<<endl;
+                int count = server_state->active_clients.load();  // Atomic load
+                if (count > 0) {
+                    string message_to_send = "BUSY\n";
+                    cout<<"sending busy message to "<<client_sock<<" "<<for_check<<" "<<bytes_received<<endl;
+                    
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                } else {
+                    string message_to_send = "IDLE\n";
+                    cout<<"sending idle message to "<<client_sock<<" "<<for_check<<" "<<bytes_received<<endl;
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                    ready_to_serve = true;
+                }
+                
+            }
+                
+            
+            if(ready_to_serve==false){
+                continue;
+            }
+            
+            
+            auto now = new chrono::time_point<chrono::system_clock>(chrono::system_clock::now());
+            auto last_time = server_state->last_concurrent_time.load();  // Atomic load of the last time
+            // Receive message from client
+            bytes_received = recv(client_sock, message, sizeof(message) - 1, 0);
+            message[bytes_received] = '\0';
+            cout << "Received message: " << message << " from " <<client_sock<<endl;
+       //     state_mutex.lock();
+       //     server_state->active_clients++;  // Increase the count of active clients
+      //      cout << "Active clients in while loop: " << server_state->active_clients << endl;
+       //     state_mutex.unlock();
+            // Process the message (as before)
+            int j = 0;
+            int offset = 0;
+            while (message[j] != '\n') {
+                offset = offset * 10 + (message[j] - '0');
+                j++;
+            }
+
+            string message_to_send = "";
+            bool does_collide =false;
+            if (*now < *last_time){
+                if(server_state->socket_id==client_sock){
+                    message_to_send="HUH!\n";
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                    cout<<"sending HUH to "<<client_sock<<endl;
+                    server_state->active_clients--;
+                    server_state->collide =false;
+                    server_state->socket_id=-1;
+                    break;
+                }
+                else{
+                    message_to_send="HUH!\n";
+                    cout<<"sending HUH to "<<client_sock<<endl;
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                    server_state->active_clients--;
+                    server_state->collide =true;
+                    break;
+                }
+            }
+            if (server_state->active_clients>1){
+                if(server_state->socket_id==client_sock){
+                    message_to_send="HUH!\n";
+                    cout<<"sending HUH to "<<client_sock<<endl;
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                    server_state->active_clients--;
+                    server_state->collide =false;
+                    server_state->last_concurrent_time.compare_exchange_strong(last_time, now);
+                    server_state->socket_id=-1;
+                    break;
+                }
+                else{
+                    message_to_send="HUH!\n";
+                    cout<<"sending HUH to "<<client_sock<<endl;
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                    server_state->active_clients--;
+                    server_state->last_concurrent_time.compare_exchange_strong(last_time, now);
+                    server_state->collide =true;
+                    break;
+                }
+            }
+            server_state->active_clients++;  // Increase the count of active clients
+            server_state->busy=true;
+            server_state->socket_id=client_sock;
+            bool is_this_last_offset = false;
+            if (offset >= m) {
+                message_to_send = "$$\n";
+                send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+            } else {
+                if (offset + k >= m) {
+                    is_this_last_offset = true;
+                }
+                vector<string> to_send;
+                for (int i = offset; i < min(m, offset + k); i++) {
+                    to_send.push_back(all_words[i]);
+                }
+                int t = to_send.size();
+                int start = 0;
+                while (start < t) {
+                    message_to_send = "";
+                    if ((server_state->active_clients>1) or (does_collide)){
+                        message_to_send="HUH!\n";
+                        cout<<"sending HUH to "<<client_sock<<endl;
+                        send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                        server_state->active_clients--;
+                        does_collide=true;  
+                        auto now = new chrono::time_point<chrono::system_clock>(chrono::system_clock::now());
+                        server_state->last_concurrent_time.compare_exchange_strong(last_time, now);
+                        server_state->socket_id=-1;
+                        break;
+                    }
+                    message_to_send = "";
+                    for (int i = start; i < min(t, (start + p)); i++) {
+                        message_to_send += to_send[i];
+                    }
+                    message_to_send += "\n";
+                    start = start + p;
+                    cout << "packet : " << message_to_send << endl;
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                }
+                if(does_collide){break;}
+                if (is_this_last_offset) {
+                    is_end_of_communication=true;
+                    message_to_send = EOF;
+                    send(client_sock, message_to_send.c_str(), message_to_send.length(), 0);
+                }
+            }
+
+            server_state->active_clients--;
+        }
+        if(is_end_of_communication){
+            break;
+        }
+    }
+
+    close(client_sock);
+    delete data;
+    pthread_exit(nullptr);
+}
+
+int main() {
+    unordered_map<string, string> json_mp;
+    ifstream bin;
+    bin.open("output.txt");
+    string key;
+    while (bin >> key) {
+        string val;
+        bin >> val;
+        json_mp[key] = val;
+    }
+    bin.close();
+    
+
+    int serverport, n, k, p;
+    n = stoi(json_mp["n"]);
+    k = stoi(json_mp["k"]);
+    p = stoi(json_mp["p"]);
+    string filename = json_mp["filename"];
+    serverport = stoi(json_mp["server_port"]);
+    const char* server_ip = json_mp["server_ip"].c_str();
+
+    vector<string> all_words = read_from_txt_file(filename);
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in server_address;
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY;
+    server_address.sin_port = htons(serverport);
+
+    
+
+    int connection_status = ::bind(server_socket, (struct sockaddr*)&server_address, sizeof(server_address));
+    vector<pthread_t> threads; 
+    listen(server_socket, n);
+    cout << "Waiting for connections..." << endl;
+
+    server_data server_state;
+
+    while (true) {
+        sockaddr_in client_address;
+        socklen_t client_address_len = sizeof(client_address);
+        int client_sock = accept(server_socket, (struct sockaddr*)&client_address, &client_address_len);
+
+        cout << "Client connected!" << endl;
+
+        client_data* data = new client_data;  // Use new to allocate memory
+        data->client_sock = client_sock;
+        data->all_words = all_words;
+        data->k = k;
+        data->p = p;
+        data->server_state = &server_state;
+
+        pthread_t thread_id;
+        int connection = pthread_create(&thread_id, nullptr, handle_client, (void*)data);
+        
+        threads.push_back(thread_id);
+    }
+
+    for (pthread_t thread : threads) {
+        pthread_join(thread, nullptr);
+    }
+
+    close(server_socket);
+    return 0;
+}
